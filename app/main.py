@@ -98,7 +98,7 @@ def login(data: LoginIn,db: Session=Depends(get_db)):
 @app.get("/api/auth/me")
 def me(u: User=Depends(current_user)): return user_dict(u)
 @app.post("/api/auth/change-password")
-def change_password(payload: dict,u: User=Depends(verified_user),db: Session=Depends(get_db)):
+def change_password(payload: dict,u: User=Depends(current_user),db: Session=Depends(get_db)):
     if not password_hash.verify(str(payload.get("current_password","")),u.password_hash): raise HTTPException(400,"La contraseña actual no coincide.")
     new=str(payload.get("new_password",""))
     if len(new)<6: raise HTTPException(400,"La nueva contraseña debe tener al menos 6 caracteres.")
