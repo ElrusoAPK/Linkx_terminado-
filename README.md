@@ -70,3 +70,28 @@ Abre `http://127.0.0.1:8000`. Documentación interactiva de la API: `http://127.
 - HTTPS es necesario para proteger credenciales durante el envío; usa la URL HTTPS de Render.
 - El sistema registra fecha y hora según `APP_TIMEZONE`, pero no sustituye una política institucional de asistencia ni un sistema oficial de Walmart. LINK X es una propuesta independiente.
 - Para instalaciones de producción, define una política de respaldo/retención de PostgreSQL y revisa las reglas internas de privacidad y tratamiento de datos del personal.
+
+
+## Acceso desde otras computadoras en la misma red local (Windows)
+
+La aplicación ahora sirve la interfaz desde FastAPI en la ruta `/` y sus archivos desde `/static`. Para usarla por la LAN:
+
+1. En la computadora servidor, abre PowerShell en la carpeta del repositorio.
+2. Activa el entorno virtual si ya existe: `.venv\\Scripts\\Activate.ps1`.
+3. Define las variables del administrador **antes de iniciar por primera vez con una base de datos nueva**. Usa un correo propio y una contraseña segura de al menos 10 caracteres:
+   ```powershell
+   $env:ADMIN_NAME="Administrador LINK X"
+   $env:ADMIN_EMAIL="tu-correo-administrador@empresa.com"
+   $env:ADMIN_PASSWORD="CAMBIA_ESTA_POR_UNA_CLAVE_SEGURA"
+   $env:JWT_SECRET="CAMBIA_POR_UN_SECRETO_LARGO_Y_ALEATORIO"
+   ```
+   No subas contraseñas ni archivos `.env` al repositorio.
+4. Inicia el servidor en todas las interfaces de red y en el puerto 8080:
+   ```powershell
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+   ```
+5. En el servidor abre `http://127.0.0.1:8080/`. Desde otra computadora conectada a la misma red abre `http://192.168.12.31:8080/` (si esa sigue siendo la IPv4 del servidor).
+6. Si otras computadoras no conectan, verifica con `ipconfig` la IPv4 del adaptador de red correcto y solicita autorización de TI para permitir TCP 8080 solo desde la subred local. No publiques este puerto en Internet.
+
+La computadora servidor debe permanecer encendida, conectada a la red y con Uvicorn ejecutándose. La dirección `192.168.12.31` solo será estable si la red mantiene esa asignación o TI configura una reserva DHCP. La base SQLite local se guarda en el directorio desde el que inicies el servidor; para uso multiusuario estable, configura respaldos y una ubicación persistente.
+
