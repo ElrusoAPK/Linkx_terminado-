@@ -93,7 +93,7 @@ def me(u: User=Depends(current_user)): return user_dict(u)
 def change_password(payload: dict,u: User=Depends(current_user),db: Session=Depends(get_db)):
     if not password_hash.verify(str(payload.get("current_password","")),u.password_hash): raise HTTPException(400,"La contraseña actual no coincide.")
     new=str(payload.get("new_password",""))
-    if len(new)<10: raise HTTPException(400,"La nueva contraseña debe tener al menos 10 caracteres.")
+    if len(new)<6: raise HTTPException(400,"La nueva contraseña debe tener al menos 6 caracteres.")
     u.password_hash=password_hash.hash(new); db.commit(); return {"message":"Contraseña actualizada."}
 @app.get("/api/users")
 def list_users(_: User=Depends(admin_only),db: Session=Depends(get_db)):
