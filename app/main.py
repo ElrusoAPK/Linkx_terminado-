@@ -32,6 +32,17 @@ class User(Base):
     must_change_password: Mapped[int]=mapped_column(Integer,default=0,nullable=False)
     created_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow)
     attendance: Mapped[list["Attendance"]]=relationship(back_populates="user")
+class AuditLog(Base):
+    __tablename__="audit_logs"
+    id: Mapped[int]=mapped_column(Integer,primary_key=True)
+    actor_id: Mapped[Optional[int]]=mapped_column(Integer,nullable=True)
+    action: Mapped[str]=mapped_column(String(80),nullable=False)
+    detail: Mapped[str]=mapped_column(String(500),default="",nullable=False)
+    created_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow)
+class SystemSetting(Base):
+    __tablename__="system_settings"
+    key: Mapped[str]=mapped_column(String(80),primary_key=True)
+    value: Mapped[str]=mapped_column(String(200),nullable=False)
 class Attendance(Base):
     __tablename__="attendance"
     id: Mapped[int]=mapped_column(Integer,primary_key=True)
@@ -85,6 +96,12 @@ def verified_user(u: User=Depends(current_user)):
 def admin_only(u: User=Depends(verified_user)):
     if u.role!="admin": raise HTTPException(403,"Acceso exclusivo para administrador.")
     return u
+def audit(db,actor,action,detail=""):
+    db.add(AuditLog(actor_id=actor.id if actor else None,action=action,detail=str(detail)[:500]))
+def settings_dict(db):
+    rows=db.scalars(select(SystemSetting)).all()
+    values={x.key:x.value for x in rows}
+    return {"work_start":values.get("work_start",""),"work_end":values.get("work_end",""),"grace_minutes":values.get("grace_minutes","0")}
 def make_token(u):
     now=datetime.now(timezone.utc)
     return jwt.encode({"sub":str(u.id),"role":u.role,"iat":now,"exp":now+timedelta(minutes=int(os.getenv("ACCESS_TOKEN_MINUTES","480")))},JWT_SECRET,algorithm="HS256")
@@ -112,7 +129,7 @@ def create_user(data: UserCreate,_: User=Depends(admin_only),db: Session=Depends
     if data.role not in ("employee","admin"): raise HTTPException(400,"Perfil inválido.")
     if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,"Ese correo ya está registrado.")
     u=User(name=data.name.strip(),email=email,password_hash=password_hash.hash(data.password),role=data.role,must_change_password=1)
-    db.add(u); db.commit(); db.refresh(u); return user_dict(u)
+    db.add(u); db.flush(); audit(db,_, "user_created", "Alta de usuario: "+u.email); db.commit(); db.refresh(u); return user_dict(u)
 @app.post("/api/users/{user_id}/reset-password")
 def reset_user_password(user_id: int,payload: dict,_: User=Depends(admin_only),db: Session=Depends(get_db)):
     u=db.get(User,user_id)
@@ -121,6 +138,7 @@ def reset_user_password(user_id: int,payload: dict,_: User=Depends(admin_only),d
     if len(new_password)<6 or len(new_password)>128: raise HTTPException(400,"La contraseña temporal debe tener entre 6 y 128 caracteres.")
     u.password_hash=password_hash.hash(new_password)
     u.must_change_password=1
+    audit(db,_, "password_reset", "Restablecimiento de contraseña: "+u.email)
     db.commit()
     return {"message":"Contraseña restablecida. El usuario deberá cambiarla al iniciar sesión.","user":user_dict(u)}
 @app.patch("/api/users/{user_id}/active")
@@ -129,7 +147,7 @@ def toggle_user(user_id: int,payload: dict,admin: User=Depends(admin_only),db: S
     if not u: raise HTTPException(404,"Usuario no encontrado.")
     active=bool(payload.get("active"))
     if u.id==admin.id and not active: raise HTTPException(400,"No puedes desactivar tu propia cuenta.")
-    u.active=int(active); db.commit(); return user_dict(u)
+    u.active=int(active); audit(db,admin,"user_status_changed",("Activación: " if active else "Desactivación: ")+u.email); db.commit(); return user_dict(u)
 @app.post("/api/attendance/{movement}",status_code=201)
 def mark_attendance(movement: str,u: User=Depends(verified_user),db: Session=Depends(get_db)):
     if movement not in ("entrada","salida"): raise HTTPException(400,"Movimiento no válido.")
@@ -139,7 +157,7 @@ def mark_attendance(movement: str,u: User=Depends(verified_user),db: Session=Dep
     if movement=="salida" and not any(a.movement=="Entrada" for a in records): raise HTTPException(409,"Primero debes registrar tu entrada.")
     if movement=="salida" and any(a.movement=="Salida" for a in records): raise HTTPException(409,"Ya registraste tu salida de hoy.")
     a=Attendance(user_id=u.id,movement="Entrada" if movement=="entrada" else "Salida",work_date=today,work_time=now.time().replace(tzinfo=None,microsecond=0))
-    db.add(a); db.commit(); db.refresh(a); return att_dict(a)
+    db.add(a); audit(db,u,"attendance_"+movement, movement+" registrada el "+today.isoformat()); db.commit(); db.refresh(a); return att_dict(a)
 @app.get("/api/attendance/mine")
 def my_attendance(start: Optional[date]=None,end: Optional[date]=None,u: User=Depends(verified_user),db: Session=Depends(get_db)):
     q=select(Attendance).where(Attendance.user_id==u.id)
@@ -161,6 +179,43 @@ def today_summary(_: User=Depends(admin_only),db: Session=Depends(get_db)):
         rows=db.scalars(select(Attendance).where(Attendance.user_id==u.id,Attendance.work_date==today).order_by(Attendance.work_time)).all()
         en=next((a for a in rows if a.movement=="Entrada"),None); sa=next((a for a in reversed(rows) if a.movement=="Salida"),None)
         result.append({"user":user_dict(u),"entry":en.work_time.strftime("%H:%M:%S") if en else None,"exit":sa.work_time.strftime("%H:%M:%S") if sa else None,"status":"Jornada cerrada" if sa else ("En jornada" if en else "Sin registro")})
+    return result
+@app.get("/api/admin/audit")
+def admin_audit(_: User=Depends(admin_only),db: Session=Depends(get_db)):
+    rows=db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(300)).all()
+    ids={x.actor_id for x in rows if x.actor_id}
+    names={u.id:u.name for u in db.scalars(select(User).where(User.id.in_(ids))).all()} if ids else {}
+    return [{"id":x.id,"actor":names.get(x.actor_id,"Sistema"),"action":x.action,"detail":x.detail,"created_at":x.created_at.isoformat()+"Z"} for x in rows]
+@app.get("/api/admin/settings")
+def get_admin_settings(_: User=Depends(admin_only),db: Session=Depends(get_db)):
+    return settings_dict(db)
+@app.put("/api/admin/settings")
+def put_admin_settings(payload: dict,admin: User=Depends(admin_only),db: Session=Depends(get_db)):
+    start=str(payload.get("work_start","")).strip()
+    end=str(payload.get("work_end","")).strip()
+    grace=str(payload.get("grace_minutes","0")).strip()
+    for value in (start,end):
+        if value and (len(value)!=5 or value[2]!=":" or not value[:2].isdigit() or not value[3:].isdigit() or int(value[:2])>23 or int(value[3:])>59):
+            raise HTTPException(400,"Los horarios deben usar formato HH:MM.")
+    if not grace.isdigit() or int(grace)>240: raise HTTPException(400,"La tolerancia debe estar entre 0 y 240 minutos.")
+    for key,value in (("work_start",start),("work_end",end),("grace_minutes",grace)):
+        row=db.get(SystemSetting,key)
+        if row: row.value=value
+        else: db.add(SystemSetting(key=key,value=value))
+    audit(db,admin,"settings_updated","Actualización de horarios y tolerancia")
+    db.commit()
+    return settings_dict(db)
+@app.get("/api/admin/incidents")
+def admin_incidents(_: User=Depends(admin_only),db: Session=Depends(get_db)):
+    today=datetime.now(ZoneInfo(os.getenv("APP_TIMEZONE","America/Mexico_City"))).date()
+    people=db.scalars(select(User).where(User.role!="admin",User.active==1).order_by(User.name)).all()
+    result=[]
+    for u in people:
+        rows=db.scalars(select(Attendance).where(Attendance.user_id==u.id,Attendance.work_date==today).order_by(Attendance.work_time)).all()
+        en=next((a for a in rows if a.movement=="Entrada"),None)
+        sa=next((a for a in reversed(rows) if a.movement=="Salida"),None)
+        if not en: result.append({"user_id":u.id,"name":u.name,"email":u.email,"type":"Sin entrada","detail":"No hay entrada registrada para hoy."})
+        elif not sa: result.append({"user_id":u.id,"name":u.name,"email":u.email,"type":"Sin salida","detail":"Tiene entrada registrada y no registra salida todavía."})
     return result
 @app.get("/api/reports/attendance.csv")
 def export_csv(start: Optional[date]=None,end: Optional[date]=None,user_id: Optional[int]=None,_: User=Depends(admin_only),db: Session=Depends(get_db)):
